@@ -1,0 +1,612 @@
+---
+title: "Infrared Thermography Data"
+author: "Filip Šajtlava, Klára Čevelová, Barbora Vařeková"
+date: "today"
+format: 
+    html:
+        toc: true
+        code-fold: true
+        code-tools:
+            source: true
+            toggle: true
+            caption: "Show the code"
+        code-summary: "Show the code"
+        css: styles.css
+theme:
+    light: flatly
+#highlight-style: github
+---
+
+```{r}
+# spojit aj rasy dohromady
+# extreme values, just look at everything and show the most blatant ones - DELETE, not impute
+# vykreslenie predikovanej premennej
+# PCA
+# ukazat linearny model vs Gamma log vs Gamma kanonicky link a vysledy vo forme grafov
+# mozno standardizacia hodnot, tym padom sa lahsie interpretuju vysledky ALE NIE STANDARDIZACIA ZAVISLEJ
+# vyber modelu a modelovanie a nasledne vysvetlenie a interpretacia, regularizacia? lasso?
+# krizove cleny, interakcie, spolocne premenne, ugh
+# silne a slabe stranky, INTERPRETACIA
+# vvyuzitie niektorych veci z prednasky, napriklad tie vveci tykajuce sa tych devianci, saturovaneho modelu etcc
+# dalsie modely, XGBOOST, LIGHTGMB a tabPFN - V PYTHONE (chat hovori ze tab ma vyjst najlepsie a lahko sa s nim robi) - treba im asi rucne spravit one hot encoding, 
+
+
+#| include: false
+library(ggplot2) |> suppressPackageStartupMessages()
+library(dplyr) |> suppressPackageStartupMessages()
+library(knitr) |> suppressPackageStartupMessages()
+library(ggcorrplot) |> suppressPackageStartupMessages()
+library(viridis) |> suppressPackageStartupMessages()
+library(kableExtra) |> suppressPackageStartupMessages()
+
+df <- read.csv("infrared_train.csv")
+vir_col <- viridis(30, option = "magma")
+```
+
+# 1 Preprocessing
+
+We're going to be working with the dataset `infrared_train.csv` with the following dimensions, modelling the variable $aveOralM$:
+
+```{r}
+#| layout-ncol: 1
+#| fig-cap:
+#|  - "Histogram of $aveOralM$"
+dim(df)
+
+df |> ggplot(aes(x = aveOralM, y = after_stat(density))) +
+    geom_histogram(color = "black", fill = vir_col[20], bins = 30) +
+    geom_density(color = vir_col[25], lwd=1.5, bw = 0.1, alpha = 0.75) +
+    theme(panel.border = element_rect(color = "black", 
+    linewidth = 1, fill = NA))
+```
+
+Visibly right-skewed, we can check the Q-Q plot and Kolmogorov-Smirnov test for normality:
+
+```{r, warning=FALSE}
+#| layout-ncol: 1
+#| fig-cap:
+#|  - "Q-Q plot"
+
+df |> ggplot(aes(sample = aveOralM)) +
+    stat_qq(color = vir_col[8]) +
+    stat_qq_line(color = vir_col[14], lwd = 1) + 
+    theme(panel.border = element_rect(color = "black", 
+    linewidth = 1, fill = NA))
+
+aveOralM_scaled <- df |> 
+    mutate(aveOralM_scaled = (aveOralM - mean(aveOralM)) / sqrt(var(aveOralM))) |>
+    pull(aveOralM_scaled)
+
+aveOralM_scaled |> ks.test("pnorm")
+
+```
+
+The test and the Q-Q plot confirm our suspicion of the data being non-gaussian.
+
+Next let's take a look at the basic structure:
+
+```{r}
+#| layout-ncol: 1
+
+df |>
+    select(c(Gender, Age, Ethnicity, Humidity, Distance, aveOralM)) |>
+    head(5) |>
+    kable()
+
+```
+
+And at the original categorical variables:
+
+::: {.grid}
+
+::: {.g-col-2}
+:::
+
+::: {.g-col-8}
+
+```{r}
+character_variables <- df |>
+    select(where(is.character)) |>
+    colnames()
+
+table(df[, character_variables[1]]) |> t() |> kable()
+```
+
+:::
+
+::: {.g-col-2}
+:::
+
+:::
+
+```{r}
+table(df[, character_variables[2]]) |> t() |> kable()
+table(df[, character_variables[3]]) |> t() |> kable()
+```
+
+Some of the $Gender$ observations are incorrectly encoded. On top of that, the $Age$ variable contains ambiguous observations within the group of 21-30 year olds. We are going to group those six people with the younger ones based on the empirical probability of them belonging to this group.
+
+The next problem are the sparse amounts of older people that might prove difficult for the model when attempting to correctly estimate the effect of this group (the same goes for American Indian or Alaskan Natives).
+
+```{r}
+# Gender fix
+df <- df |>
+    mutate(Gender = case_when(
+        Gender %in% c("Female", "female") ~ "F",
+        Gender %in% c("Male", "male") ~ "M"
+        )
+    )
+
+df$Gender <- factor(df$Gender)
+
+# Age fix
+df <- df |>
+    mutate(Age = case_when(
+        Age %in% c(">60", "31-40", "41-50", "51-60") ~ "31+",
+        Age == "21-30" ~ "21-25",
+        TRUE ~ Age
+        )
+    )
+
+# Ethnicity - leave it out for now
+
+#df |>
+#    filter(Ethnicity == "American Indian or Alaskan Native") |>
+#    head(2) |> kable()
+
+#The two observations with $Ethnicity = American Indian or Alaskan Native$ are not all too interesting in regards to our modelled variable $aveOralM$. There could be ways to incorporate them into other race groups based on their attributes, but it's safer to just completely get rid of them (as we arent )
+
+df$Ethnicity <- factor(df$Ethnicity)
+```
+
+
+## 1.1 Missing Values
+
+We should check the dataset for any <u>NA values</u> and the total sum of observations (rows) containing any empty values:
+
+::: {.grid}
+
+::: {.g-col-1}
+:::
+
+::: {.g-col-4}
+
+```{r}
+df |>
+    is.na() |>
+    colSums() |>
+    as.data.frame() |>
+    rename("Rows with NAs" = "colSums(is.na(df))") |>
+    filter(`Rows with NAs` > 0) |> kable()
+```
+:::
+
+::: {.g-col-2}
+:::
+
+::: {.g-col-4}
+```{r}
+
+is.na(df) |> 
+    table() |> 
+    as.data.frame() |> 
+    rename("Missing values" = Var1) |> kable()
+```
+
+$\rightarrow$ Implies NA values are unique for each row
+
+
+:::
+
+::: {.g-col-1}
+:::
+
+:::
+
+Here are the observations with age as a missing value:
+
+```{r}
+df |> 
+    filter(if_any("Age", is.na)) |> 
+    kable()
+```
+
+
+There are 3 possibilities:
+
+1. Delete all of the NA rows because of their small proportion (~5 %) in the dataset,
+2. Impute the values using means, medians, most occurring values, etc.,
+3. Investigate if the emptiness doesn't have a deeper meaning (not very probable because of their overall small frequency).
+
+### 1.1.1 Imputation of $Age$ and $Distance$
+
+We will impute the rows for $Age$ and $Distance$. First we have to take a look at the overall structure using `summary()`:
+
+::: {.grid}
+
+::: {.g-col-2}
+:::
+
+::: {.g-col-3}
+
+```{r}
+df |> select(Distance) |> summary()
+```
+
+:::
+
+::: {.g-col-2}
+:::
+
+::: {.g-col-4}
+```{r}
+df |> select(Age) |> table() |> t() |> kable()
+```
+
+:::
+
+::: {.g-col-1}
+:::
+
+:::
+
+As we can see, one of the values ($Distance = 79$) is completely out of it's own possible scope, we will impute that value as well.
+
+```{r}
+#| layout-ncol: 2
+#| fig-cap:
+#|  - "Histogram of $Distance$"
+#|  - "Barplot of $Age$"
+
+df |> 
+    filter(Distance < 10) |> 
+    ggplot(aes(x = Distance, y = after_stat(density))) +
+    geom_histogram(fill = vir_col[8], color = "black", binwidth = 0.05) +
+    geom_density(color = vir_col[14], lwd = 1.5, bw = 0.02) +
+    theme(panel.border = element_rect(color = "black", 
+    linewidth = 1, fill = NA))
+
+df |>
+    ggplot(aes(x = Age)) +
+    geom_bar(fill = vir_col[17], color = "black") +
+    theme(panel.border = element_rect(color = "black", 
+    linewidth = 1, fill = NA))
+```
+
+Due to the observed skewness we will impute $Distance$ with median. For the $Age$ variable, the most occurring value will be used (that being the cohort of 18-20 year olds).
+
+```{r}
+
+distance_no_extremes <- df |>
+    filter(Distance < 10 & !is.na(Distance)) |>
+    pull(Distance)
+
+most_occuring_age <- df |> 
+    select(Age) |> 
+    table() |> 
+    as.data.frame() |> 
+    arrange(desc(Freq)) |>
+    pull(Age) %>%
+    .[1] |>
+    as.character()
+
+df <- df |> 
+    mutate(
+        Distance = ifelse(
+            Distance > 10 | is.na(Distance),
+            median(distance_no_extremes),
+            Distance
+        ),
+        Age = ifelse(
+            is.na(Age),
+            most_occuring_age,
+            Age
+        )
+    )
+
+df$Age <- factor(df$Age)
+```
+
+### 1.1.2 Imputation of $aveAllR13\_1$ and $canthiMax1$
+
+```{r, warning=FALSE}
+#| layout-ncol: 2
+#| fig-cap:
+#|  - "Histogram of $aveAllR13\_1$"
+#|  - "Histogram of $canthiMax1$"
+
+df |>
+    ggplot(aes(x = aveAllR13_1, y = after_stat(density))) +
+    geom_histogram(fill = vir_col[20], color = "black", bins = 30) +
+    geom_density(color = vir_col[24], lwd = 1.5) +
+    theme(panel.border = element_rect(color = "black", 
+    linewidth = 1, fill = NA))
+
+df |>
+    ggplot(aes(x = canthiMax1, y = after_stat(density))) +
+    geom_histogram(fill = vir_col[27], color = "black", bins = 30) +
+    geom_density(color = vir_col[30], lwd = 1.5) +
+    theme(panel.border = element_rect(color = "black", 
+    linewidth = 1, fill = NA))
+```
+
+Due to these variables having more missing observations, we should impute taking into consideration other relationships they might have.
+
+```{r, warning=FALSE}
+#| layout-ncol: 2
+#| fig-cap:
+#|  - "Histograms of $aveAllR13\_1$ based on $Gender$"
+#|  - "Boxplots of $aveAllR13\_1$ based on $Age$"
+df |>
+    ggplot() +
+    geom_histogram(aes(x = aveAllR13_1, y = after_stat(density), fill = Gender, alpha = Gender), color = "black", bins = 30, position = "identity") + 
+    geom_density(aes(x = aveAllR13_1, color = Gender), lwd = 1.5) +
+
+    scale_color_manual(values = c("F" = vir_col[22], "M" = vir_col[9])) +
+    scale_alpha_manual(values = c("F" = 1, "M" = 0.75)) +
+    scale_fill_manual(values = c("F" = vir_col[20], "M" = vir_col[7])) +
+    theme(panel.border = element_rect(color = "black", 
+    linewidth = 1, fill = NA))
+
+
+df |>
+    ggplot() +
+    geom_boxplot(aes(y = aveAllR13_1, fill = Age)) +
+    scale_fill_manual(values = c("18-20" = vir_col[26], 
+    "21-25" = vir_col[20], "26-30" = vir_col[12], "31+" = vir_col[5])) +
+    theme(panel.border = element_rect(color = "black", 
+    linewidth = 1, fill = NA))
+```
+
+Males do seem to be a bit more right-skewed with the values, implying their values of $aveAllR13\_1$ are higher. On the boxplot, it's clear that aging has a negative effect on the variable, <span style="color: #3F0F72;">though it's also important to realize that the classes have varying counts of observations, with the last two groups being only a small fraction of the first ones.</span>
+
+We can also take a look at the modelled variable scatterplot in combination with the $aveAllR13\_1$ to find out their positive correlation:
+
+```{r, warning=FALSE}
+#| layout-ncol: 1
+#| fig-cap:
+#| - "Scatterplot of $aveAllR13\_1$ in relation to the modelled variable"
+df |>  
+    ggplot(aes(x = aveAllR13_1, y = aveOralM, color = Gender)) +
+    geom_point(cex = 1.65) + 
+    scale_color_manual(values = c("F" = vir_col[20], "M" = vir_col[5])) +
+    geom_smooth(method = "lm", formula = y ~ x, se = FALSE) +
+    theme(panel.border = element_rect(color = "black", 
+    linewidth = 1, fill = NA))
+```
+
+Using a linear model we estimated the trend of both sexes, with males being more positively correlated to the outcome on the basis of $aveAllR13\_1$.
+
+We are also able to see some extreme values, with two people having internal oral temperature of $40+^\circ$C, which is possible, but highly unlikely.
+
+```{r, warning=FALSE}
+#| fig-cap:
+#| - "Scatterplot of $aveAllR13\_1$ in relation to the modelled variable"
+df |>  
+    ggplot() +
+    geom_point(aes(x = aveAllR13_1, y = aveOralM, color = Age),cex = 1.65) + 
+    scale_color_manual(values = c("18-20" = vir_col[26], 
+    "21-25" = vir_col[20], "26-30" = vir_col[12], "31+" = vir_col[5])) +
+    theme(panel.border = element_rect(color = "black", 
+    linewidth = 1, fill = NA))
+```
+
+Based on these observations, we will impute the values using the medians of $aveAllR13\_1$ based on their $Gender$.
+
+::: {.grid}
+
+::: {.g-col-4}
+:::
+
+::: {.g-col-4}
+
+```{r}
+df |>
+    filter(!is.na(aveAllR13_1)) |>
+    group_by(Gender) |>
+    summarise(
+        mean = round(mean(aveAllR13_1), 3),
+        median = round(median(aveAllR13_1), 3)
+    ) |> kable()
+```
+
+:::
+
+::: {.g-col-4}
+:::
+
+:::
+
+```{r, warning=FALSE}
+#| fig-cap:
+#| - "Scatterplot of $aveAllR13\_1$ in relation to the modelled variable"
+
+medians_aveAllR13_1 <- df |>
+    group_by(Gender) |>
+    summarise(
+        median_value = median(aveAllR13_1, na.rm = TRUE)
+    )
+
+female_median_aveAllR13_1 <- medians_aveAllR13_1 |> 
+    filter(Gender == "F") |> pull(median_value)
+male_median_aveAllR13_1 <- medians_aveAllR13_1 |> 
+    filter(Gender == "M") |> pull(median_value)
+
+df <- df |>
+    mutate(
+        aveAllR13_1 = ifelse(
+            is.na(aveAllR13_1),
+            ifelse(
+                Gender == "M",
+                male_median_aveAllR13_1,
+                female_median_aveAllR13_1
+            ),
+            aveAllR13_1
+        )
+    )
+```
+
+The variable $canthiMax1$ will be imputed in a similar fashion (taking into account that even 23 missing values still make up only a measly 3 % of the entire dataset).
+
+```{r, warning=FALSE}
+#| layout-ncol: 2
+#| fig-cap:
+#| - "Boxplots of $canthiMax1$ based on $Gender$"
+#| - "Scatterplot of $canthiMax1$ in relation to the modelled variable"
+df |>
+    ggplot() +
+    geom_boxplot(aes(y = canthiMax1, fill = Gender)) +
+    scale_fill_manual(values = c("F" = vir_col[20], "M" = vir_col[5])) +
+    theme(panel.border = element_rect(color = "black", 
+    linewidth = 1, fill = NA))
+
+df |>
+    ggplot() + 
+    geom_point(aes(x = canthiMax1, y = aveOralM, color = Age),cex = 1.65) + 
+    scale_color_manual(values = c("18-20" = vir_col[26], 
+    "21-25" = vir_col[20], "26-30" = vir_col[12], "31+" = vir_col[5])) +
+    theme(panel.border = element_rect(color = "black", 
+    linewidth = 1, fill = NA))
+```
+
+The variable $canthiMax1$ is a bit more right-skewed, so using median would be a wiser choice compared to the mean.
+
+::: {.grid}
+
+::: {.g-col-4}
+:::
+
+::: {.g-col-4}
+
+```{r}
+df |>
+    filter(!is.na(canthiMax1)) |>
+    group_by(Gender) |>
+    summarise(
+        mean = round(mean(canthiMax1), 3),
+        median = round(median(canthiMax1), 3)
+    ) |> kable()
+```
+
+:::
+
+::: {.g-col-4}
+:::
+
+:::
+
+```{r}
+medians_canthiMax1 <- df |>
+    group_by(Gender) |>
+    summarise(
+        median_value = median(canthiMax1, na.rm = TRUE)
+    )
+
+female_median_canthiMax1 <- medians_canthiMax1 |> 
+    filter(Gender == "F") |> pull(median_value)
+male_median_canthiMax1 <- medians_canthiMax1 |> 
+    filter(Gender == "M") |> pull(median_value)
+
+df <- df |>
+    mutate(
+        canthiMax1 = ifelse(
+            is.na(canthiMax1),
+            ifelse(
+                Gender == "M",
+                male_median_canthiMax1,
+                female_median_canthiMax1
+            ),
+            canthiMax1
+        )
+    )
+```
+
+# 1.2 Outliers and Leverages
+
+We've already fixed the found outliers in $Distance$. Now we have to take a look at other variables possibly being encoded wrongly.
+
+```{r, warning=FALSE}
+#| layout-ncol: 3
+
+df |> ggplot() +
+    geom_histogram(aes(x = T_LC_Wet1), color = "black", fill = vir_col[8], bins = 30) +
+    theme(panel.border = element_rect(color = "black", 
+    linewidth = 1, fill = NA))
+
+df |> ggplot() +
+    geom_histogram(aes(x = T_FHTC1), color = "black", fill = vir_col[13], bins = 30) +
+    theme(panel.border = element_rect(color = "black", 
+    linewidth = 1, fill = NA))
+
+df |> ggplot() +
+    geom_histogram(aes(x = T_FHC_Max1), color = "black", fill = vir_col[18], bins = 30) +
+    theme(panel.border = element_rect(color = "black", 
+    linewidth = 1, fill = NA))
+```
+
+```{r}
+model <- lm(data = df, formula = aveOralM ~ .)
+summary(model)
+plot(model, which = 6)
+```
+
+```{r}
+model_gamma <- glm(data = df, formula = aveOralM ~ ., family = Gamma(link = "log"))
+summary(model_gamma)
+plot(model_gamma, which = 1)
+```
+
+```{r}
+df |>
+    ggplot() +
+    geom_boxplot(aes(x = T_LC_Wet1))
+```
+
+
+```{r}
+df |>
+    select(aveOralM) |>
+    filter(aveOralM < 36)
+```
+
+
+# 1.3 Visualization
+
+```{r, warning=FALSE}
+#| fig-width: 8
+#| fig-height: 8
+#| warning: FALSE
+cor_matrix <- df |>
+    select(where(is.numeric)) |>
+    cor() |>
+    round(1)
+
+cor_matrix |> ggcorrplot(
+    type="lower",
+    lab=TRUE,
+    lab_size=3,
+    lab_col="black",
+    outline.color = "black"
+    ) +
+    scale_fill_viridis_c(
+        option="magma",
+        limits=c(-1, 1)
+    ) +
+    theme(panel.border = element_rect(color = "black", 
+    linewidth = 1, fill = NA))
+```
+
+# 2 Modelling
+## Vo vnutri interpretacia
+
+This is some text. Now some math text $x^2 = \sum_{i = 0}^\infty$.
+
+```{r}
+#| layout-ncol: 3
+plot(pressure)
+plot(cars)
+```
+
+```{r}
+
+```

@@ -1,0 +1,9 @@
+/* styles.css */
+
+h1 {
+  text-align: center; /* Centers your headers */
+}
+
+p {
+  text-align: left; /* Forces paragraphs back to the left */
+}
