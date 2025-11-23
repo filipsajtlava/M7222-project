@@ -1,0 +1,38 @@
+
+```{r}
+## Define a function to calculate the RMSPE
+RMSPE <- function(true_values, predictions) {
+  # Extract columns
+  T_true <- true_values$aveOralM
+  T_pred <- predictions$aveOralM
+  
+  # Check type and length
+  if (!is.numeric(T_pred)) stop("Predictions are not numeric!")
+  if (length(T_true) != length(T_pred)) stop("Number of true and predicted values differ!")
+  
+  # Calculate RMSPE
+  rmspe <- sqrt(mean((T_true - T_pred)^2))
+  return(rmspe)
+}
+```
+
+```{r}
+df_test <- read.csv("infrared_test.csv")
+df_test |> str()
+```
+
+```{r}
+df_test <- categorical_fix(df_test)
+df_test <- dummy_cols(df_test, select_columns = "Ethnicity", remove_first_dummy = FALSE)
+df_test <- dummy_cols(df_test, select_columns = "Age", remove_first_dummy = FALSE)
+df_test <- dummy_cols(df_test, select_columns = "Gender", remove_first_dummy = FALSE)
+
+mean_T_OR1 <- mean(df_test$T_OR1)
+mean_canthi4Max1 <- mean(df_test$canthi4Max1)
+
+df_test <- df_test %>%
+  mutate(
+    T_OR1_c = T_OR1 - mean_T_OR1,
+    canthi4Max1_c = canthi4Max1 - mean_canthi4Max1
+  )
+```
