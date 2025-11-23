@@ -1,5 +1,3 @@
-
-```{r}
 ## Define a function to calculate the RMSPE
 RMSPE <- function(true_values, predictions) {
   # Extract columns
@@ -14,14 +12,10 @@ RMSPE <- function(true_values, predictions) {
   rmspe <- sqrt(mean((T_true - T_pred)^2))
   return(rmspe)
 }
-```
 
-```{r}
 df_test <- read.csv("infrared_test.csv")
 df_test |> str()
-```
 
-```{r}
 df_test <- categorical_fix(df_test)
 df_test <- dummy_cols(df_test, select_columns = "Ethnicity", remove_first_dummy = FALSE)
 df_test <- dummy_cols(df_test, select_columns = "Age", remove_first_dummy = FALSE)
@@ -35,4 +29,3 @@ df_test <- df_test %>%
     T_OR1_c = T_OR1 - mean_T_OR1,
     canthi4Max1_c = canthi4Max1 - mean_canthi4Max1
   )
-```
